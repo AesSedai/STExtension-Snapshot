@@ -3,7 +3,7 @@ import { SlashCommandParser } from '/scripts/slash-commands/SlashCommandParser.j
 import { SlashCommand } from '/scripts/slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '/scripts/slash-commands/SlashCommandArgument.js';
 import { callPopup } from '/script.js';
-import html2canvas from 'https://esm.sh/@wtto00/html2canvas';
+import html2canvas from 'https://esm.sh/html2canvas-pro';
 //I HATE DOMTOIMAGE I HATE DOMTOIMAGE
 
 const extensionName = "Snapshot"
