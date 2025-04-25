@@ -7,7 +7,7 @@ All styling is respected, and the width of the messages is decided by your chat 
 ![tutimage](https://i.imgur.com/X8EWaP2.png)
 1. Open Extensions Menu
 2. Open "Install Extenstion"
-3. Paste the extension link: "https://github.com/TheZennou/STExtension-Snapshot"
+3. Paste the extension link: "https://github.com/AesSedai/STExtension-Snapshot"
 4. Click Save, and you're done! :)
 ***
 Has two modes, 
