@@ -3,8 +3,7 @@ import { SlashCommandParser } from '/scripts/slash-commands/SlashCommandParser.j
 import { SlashCommand } from '/scripts/slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '/scripts/slash-commands/SlashCommandArgument.js';
 import { callPopup } from '/script.js';
-import html2canvas from 'https://esm.sh/html2canvas-pro';
-//I HATE DOMTOIMAGE I HATE DOMTOIMAGE
+import { domToBlob } from './lib/modern-screenshot.mjs';
 
 const extensionName = "Snapshot"
 const isMobileDevice = window.innerWidth <= 768;
@@ -12,7 +11,7 @@ let useMobileMode = isMobileDevice;
 
 const SNAPSHOT_DEBUG = false;
 
-async function captureChatLog(format = 'regular', messageRange = null, anonymizeUser = false, anonymizeStylesheet = false) {
+async function captureChatLog(format = 'regular', messageRange = null, anonymizeUser = false, anonymizeStylesheet = false, showReasoning = false) {
     const chatContainer = document.getElementById('chat');
     if (!chatContainer) {
         console.error("Chat log container not found.");
@@ -49,9 +48,13 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
     }
 
     try {
-        //First of all, we create a container and set its style properly
+        //First of all, we create a container and set its style properly.
+        //In list mode we keep it as a plain block container so messages stack
+        //via natural block flow — the old flex-row wrapper interacted badly
+        //with body's `height: 100vh` and collapsed the captured height.
         const containerDiv = document.createElement("div");
-        containerDiv.style.display = 'flex';
+        containerDiv.style.display = format === 'grid' ? 'flex' : 'block';
+        containerDiv.style.width = 'max-content';
         if (anonymizeStylesheet) {
             //Why yes, I copied all of these from my personal theme, how could you tell?
             containerDiv.style.setProperty("--doc-height", "732 px");
@@ -66,7 +69,7 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
             containerDiv.style.setProperty("--SmartThemeBlurTintColor", "rgba(23, 23, 23, 1)");
             containerDiv.style.setProperty("--SmartThemeChatTintColor", "rgba(23, 23, 23, 1)");
             containerDiv.style.setProperty("--SmartThemeUserMesBlurTintColor", "rgba(30, 30, 30, 0.9)");
-            containerDiv.style.setProperty("--SmartThemeBotMesBlurTintColor", "rgba(30, 30, 30, 0.9)");-
+            containerDiv.style.setProperty("--SmartThemeBotMesBlurTintColor", "rgba(30, 30, 30, 0.9)");
             containerDiv.style.setProperty("--SmartThemeShadowColor", "rgba(0, 0, 0, 1)");
             containerDiv.style.setProperty("--SmartThemeBorderColor", "rgba(0, 0, 0, 0.5)");
 
@@ -79,35 +82,61 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
 
         //Then we create a grid and set its style. We'll put inside this inside the container in a minute
         const gridDiv = document.createElement("div");
-        gridDiv.style.flex = 'flex-initial';
-        gridDiv.style.display = 'flex';
-        gridDiv.style.flexDirection = 'column';
-        gridDiv.style.flexWrap = 'wrap';
-        gridDiv.style.justifyContent = 'space-between';
         gridDiv.style.padding = "15px";
+        if (format === 'grid') {
+            gridDiv.style.display = 'flex';
+            gridDiv.style.flexDirection = 'column';
+            gridDiv.style.flexWrap = 'wrap';
+            gridDiv.style.justifyContent = 'space-between';
+        } else {
+            // Plain block stacking. Flex-column-wrap interacted with body's
+            // `height: 100vh` and reflowed messages into multiple short
+            // columns, collapsing the captured height to ~45px.
+            gridDiv.style.display = 'block';
+        }
 
-        //Clone the messageElements so we don't mess them up on accident. Anonymize shit if necessary
-        const messageElements = Array.from(chatContainer.querySelectorAll(".mes")).filter((v, i) => {
-                //If the message range is just a number, we pick that message
-                if (/^\d+$/.test(messageRange)) {
-                    return i === Number.parseInt(messageRange)
-                }
+        // Sane width fallback. When the UI dialog opens, the chat is
+        // overlaid by ST's popup and individual `.mes` elements can briefly
+        // report `scrollWidth === 0`, which would otherwise produce a tiny
+        // capture. The slash command path doesn't hit this because it runs
+        // without a popup.
+        const fallbackWidth = chatContainer.offsetWidth || chatContainer.scrollWidth || 800;
 
-                //If it's a range, we take all of those, closed on both sides
-                if (/^\d+-\d+$/.test(messageRange)) {
-                    const interval = messageRange.split("-").map(s => Number.parseInt(s, 10));
-                    return i >= interval[0] && i <= interval[1]
-                }
+        //Clone the messageElements so we don't mess them up on accident. Anonymize shit if necessary.
+        //Filter by the mesid attribute (= the message's true index in the chat),
+        //not the DOM-order index from querySelectorAll — ST only mounts the
+        //last 50 messages on a fresh load, so DOM index drifts from mesid.
+        const allMessages = Array.from(chatContainer.querySelectorAll(".mes"));
+        const filteredMessages = allMessages.filter((el) => {
+            const mesid = Number.parseInt(el.getAttribute('mesid'), 10);
+            if (Number.isNaN(mesid)) return false;
 
-                //Otherwise we pull everything
-                return true;
+            //If the message range is just a number, we pick that message
+            if (/^\d+$/.test(messageRange)) {
+                return mesid === Number.parseInt(messageRange, 10);
             }
-        ).map(el => {
+
+            //If it's a range, we take all of those, closed on both sides
+            if (/^\d+-\d+$/.test(messageRange)) {
+                const interval = messageRange.split("-").map(s => Number.parseInt(s, 10));
+                return mesid >= interval[0] && mesid <= interval[1];
+            }
+
+            //Otherwise we pull everything that's loaded
+            return true;
+        });
+
+        if (messageRange && filteredMessages.length === 0) {
+            console.warn(`[Snapshot] No messages match range "${messageRange}".`);
+            return;
+        }
+
+        const messageElements = filteredMessages.map(el => {
             const clone = el.cloneNode(true);
             if (anonymizeStylesheet || useMobileMode) {
                 clone.style.width = '800px';
             } else {
-                clone.style.width = `${el.scrollWidth}px`;
+                clone.style.width = `${el.scrollWidth || el.offsetWidth || fallbackWidth}px`;
             }
 
             if (anonymizeUser) {
@@ -121,6 +150,16 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
                     mesText.innerHTML = mesText.innerHTML.replace(new RegExp(userName, 'g'), 'Anon');
                 }
             }
+
+            // Reasoning blocks: either expand them fully or strip them out.
+            const reasoningDetails = clone.querySelectorAll('.mes_reasoning_details');
+            reasoningDetails.forEach(d => {
+                if (showReasoning) {
+                    d.setAttribute('open', '');
+                } else {
+                    d.remove();
+                }
+            });
 
             return clone;
         });
@@ -138,6 +177,20 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
             //Or the square root of the grid area, so it's square-ish
             gridDiv.style.maxHeight = `${Math.max(maxMesHeight, Math.ceil(Math.sqrt(gridDiv.scrollWidth * gridDiv.scrollHeight)))}px`
             containerDiv.style.height = `${gridDiv.offsetHeight}px`;
+        } else {
+            // List mode: stamp explicit dimensions from the laid-out clones so
+            // capture doesn't rely on `width: max-content` resolving correctly
+            // (which collapses to ~45px when ST's popup overlay is active).
+            void containerDiv.offsetHeight; // force layout
+            const clones = Array.from(gridDiv.children);
+            const maxChildWidth = Math.max(...clones.map(el => el.offsetWidth || 0), 0);
+            const totalChildHeight = clones.reduce((sum, el) => sum + (el.offsetHeight || 0), 0);
+            if (maxChildWidth > 0) {
+                containerDiv.style.width = `${maxChildWidth + 30}px`;
+            }
+            if (totalChildHeight > 0) {
+                containerDiv.style.height = `${totalChildHeight + 30}px`;
+            }
         }
 
         //In debug mode, we just drop the whole thing in body so we can inspect
@@ -151,17 +204,16 @@ async function captureChatLog(format = 'regular', messageRange = null, anonymize
             return;
         }
 
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const canvas = await html2canvas(containerDiv, {
+        // modern-screenshot uses SVG <foreignObject> to hand the cloned DOM to the
+        // browser's native renderer — far faster than html2canvas's JS rasterizer,
+        // and it correctly honors <details> open/closed state so collapsed
+        // reasoning blocks no longer overlap the message body.
+        // Force a layout flush so getBoundingClientRect reflects post-clone sizes.
+        void containerDiv.offsetHeight;
+        const imgBlob = await domToBlob(containerDiv, {
             backgroundColor: containerDiv.style.backgroundColor,
-            useCORS: true,
-            scale: 1,
-            logging: true,
-            width: gridDiv.scrollWidth,
-        });
-
-        const imgBlob = await new Promise(resolve => {
-            canvas.toBlob(resolve, 'image/png');
+            scale: window.devicePixelRatio || 1,
+            type: 'image/png',
         });
 
         //Funny code to download files genned with JS, bog standard
@@ -213,6 +265,7 @@ async function openSnapshotMenu() {
             <input type="checkbox" id="mobile_mode_checkbox" ${useMobileMode ? 'checked' : ''} style="margin-left: 5px;">
           </div>
         </div>
+        <div id="snapshot_range_warning" style="margin-top: 6px; min-height: 1.2em; font-size: 0.85em; color: #e0a341; text-align: center;"></div>
         <div class="flex-container" style="margin-top: 10px; justify-content: space-between; align-items: center;">
           <div style="display: flex; align-items: center;">
             <label for="anonymize_user_checkbox">Anonymize User:</label>
@@ -226,6 +279,13 @@ async function openSnapshotMenu() {
             <i class="fa-solid fa-circle-exclamation" title="Applies a default stylesheet to the snapshot, overriding user settings." style="margin-left: 5px; cursor: help;"></i>
           </div>
         </div>
+        <div class="flex-container" style="margin-top: 10px; justify-content: center; align-items: center;">
+          <div style="display: flex; align-items: center;">
+            <label for="show_reasoning_checkbox">Reasoning Expanded:</label>
+            <input type="checkbox" id="show_reasoning_checkbox" style="margin-left: 5px;">
+            <i class="fa-solid fa-circle-exclamation" title="If checked, reasoning blocks are forced open and included in the snapshot. If unchecked, reasoning blocks are omitted entirely." style="margin-left: 5px; cursor: help;"></i>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -235,17 +295,60 @@ async function openSnapshotMenu() {
         const messageRange = dialog.find('#message_range_input').val();
         const anonymizeUser = dialog.find('#anonymize_user_checkbox').is(':checked');
         const anonymizeStylesheet = dialog.find('#anonymize_stylesheet_checkbox').is(':checked');
-        captureChatLog('regular', messageRange, anonymizeUser, anonymizeStylesheet);
+        const showReasoning = dialog.find('#show_reasoning_checkbox').is(':checked');
+        captureChatLog('regular', messageRange, anonymizeUser, anonymizeStylesheet, showReasoning);
     });
     dialog.find('#snapshot_grid_button').on('click', () => {
         const messageRange = dialog.find('#message_range_input').val();
         const anonymizeUser = dialog.find('#anonymize_user_checkbox').is(':checked');
         const anonymizeStylesheet = dialog.find('#anonymize_stylesheet_checkbox').is(':checked');
-        captureChatLog('grid', messageRange, anonymizeUser, anonymizeStylesheet);
+        const showReasoning = dialog.find('#show_reasoning_checkbox').is(':checked');
+        captureChatLog('grid', messageRange, anonymizeUser, anonymizeStylesheet, showReasoning);
     });
     dialog.find('#mobile_mode_checkbox').on('change', function() {
         useMobileMode = this.checked;
     });
+
+    // Snapshot what's currently loaded so we can warn about out-of-range
+    // requests before the user takes the screenshot.
+    const loadedMesids = Array.from(document.querySelectorAll('#chat .mes'))
+        .map(el => Number.parseInt(el.getAttribute('mesid'), 10))
+        .filter(n => !Number.isNaN(n));
+    const loadedMin = loadedMesids.length ? Math.min(...loadedMesids) : null;
+    const loadedMax = loadedMesids.length ? Math.max(...loadedMesids) : null;
+
+    const updateRangeWarning = () => {
+        const warningEl = dialog.find('#snapshot_range_warning');
+        const raw = String(dialog.find('#message_range_input').val() ?? '').trim();
+        if (!raw) { warningEl.text(''); return; }
+        if (loadedMin === null) {
+            warningEl.text('No messages loaded.');
+            return;
+        }
+
+        let reqStart, reqEnd;
+        if (/^\d+$/.test(raw)) {
+            reqStart = reqEnd = Number.parseInt(raw, 10);
+        } else if (/^\d+-\d+$/.test(raw)) {
+            [reqStart, reqEnd] = raw.split('-').map(s => Number.parseInt(s, 10));
+        } else {
+            warningEl.text(`Invalid range format. Use "N" or "N-M".`);
+            return;
+        }
+
+        const fullyOutside = reqEnd < loadedMin || reqStart > loadedMax;
+        const partiallyOutside = reqStart < loadedMin || reqEnd > loadedMax;
+        if (fullyOutside) {
+            warningEl.text(`Range ${reqStart}–${reqEnd} is fully outside loaded mesids ${loadedMin}–${loadedMax}. Capture will be empty. Scroll up and click "Show more messages" to load older messages.`);
+        } else if (partiallyOutside) {
+            const capStart = Math.max(reqStart, loadedMin);
+            const capEnd = Math.min(reqEnd, loadedMax);
+            warningEl.text(`Only mesids ${capStart}–${capEnd} of requested ${reqStart}–${reqEnd} are loaded. Scroll up and click "Show more messages" to include older ones.`);
+        } else {
+            warningEl.text('');
+        }
+    };
+    dialog.find('#message_range_input').on('input', updateRangeWarning);
 
     $('#dialogue_popup').addClass('wide_dialogue_popup');
     callPopup(dialog, 'text', '', { wide: false, large: false, okButton: 'Finish' });
@@ -273,7 +376,8 @@ jQuery(function () {
             const messageRange = namedArgs.range ?? null;
             const anonymizeUser = namedArgs.anonymize === 'on' || namedArgs.anonymize === 'true';
             const anonymizeStylesheet = namedArgs.anonymizeStylesheet === 'on' || namedArgs.anonymizeStylesheet === 'true';
-            captureChatLog(format, messageRange, anonymizeUser, anonymizeStylesheet);
+            const showReasoning = namedArgs.reasoning === 'on' || namedArgs.reasoning === 'true';
+            captureChatLog(format, messageRange, anonymizeUser, anonymizeStylesheet, showReasoning);
         },
         aliases: ['snapshot'],
         returns: 'nothing (captures an image of the chat log)',
@@ -301,6 +405,13 @@ jQuery(function () {
             SlashCommandNamedArgument.fromProps({
                 name: 'anonymizeStylesheet',
                 description: 'whether to apply a default stylesheet',
+                typeList: ARGUMENT_TYPE.BOOLEAN,
+                defaultValue: 'false',
+                enumList: ['true', 'false'],
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'reasoning',
+                description: 'whether to include reasoning blocks (forced expanded)',
                 typeList: ARGUMENT_TYPE.BOOLEAN,
                 defaultValue: 'false',
                 enumList: ['true', 'false'],
